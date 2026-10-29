@@ -8,7 +8,8 @@
   var CACHE = "lifeos.cache.v1", UI = "lifeos.ui.v1";
   // Full Drive scope so the app can read inbox files that Claude creates through the Drive
   // connector (the connector can create files but cannot rewrite one).
-  var SCOPE = "https://www.googleapis.com/auth/drive";
+  // Calendar scope: to-dos with a time become Google Calendar events so the phone alerts you.
+  var SCOPE = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/calendar.events";
   var INBOX = "lifeos-inbox";
 
   /* ---------- small helpers ---------- */
@@ -145,6 +146,46 @@
     });
     return d;
   }
+  /* Calendar reminders. The event id is derived from the to-do id, so every device creates
+     the same event and a second insert just gets 409 (already there). */
+  var CAL = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+  function eventId(todoId) {
+    return "lifeos" + Array.prototype.map.call(String(todoId), function (ch) { return ch.charCodeAt(0).toString(16); }).join("");
+  }
+  function wantsEvent(t) { return t && !t.done && t.due && t.time && t.due >= today(); }
+  function createEvent(t) {
+    var start = new Date(t.due + "T" + t.time + ":00"), end = new Date(start.getTime() + 15 * 60000);
+    var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    var local = function (d) { return ymd(d) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":00"; };
+    var body = { id: eventId(t.id), summary: t.text, description: "From lifeOS (" + t.category + ")",
+      start: { dateTime: local(start), timeZone: tz }, end: { dateTime: local(end), timeZone: tz },
+      reminders: { useDefault: false, overrides: [{ method: "popup", minutes: 0 }] } };
+    return api("POST", CAL, JSON.stringify(body), "application/json").catch(function (e) {
+      if (e.message !== "drive 409") throw e;
+    });
+  }
+  function deleteEvent(todoId) {
+    return api("DELETE", CAL + "/" + eventId(todoId)).catch(function (e) {
+      if (e.message !== "drive 404" && e.message !== "drive 410") throw e;
+    });
+  }
+  // Runs after each sync: add events for timed to-dos, remove them once done.
+  var calBusy = false, calWarned = false;
+  function syncCalendar() {
+    if (calBusy || !hasToken()) return;
+    var add = data.todos.filter(function (t) { return wantsEvent(t) && !t.calEvent; });
+    var drop = data.todos.filter(function (t) { return t.calEvent && t.done; });
+    if (!add.length && !drop.length) return;
+    calBusy = true;
+    Promise.all(add.map(function (t) { return createEvent(t).then(function () { return [t.id, true]; }); })
+      .concat(drop.map(function (t) { return deleteEvent(t.id).then(function () { return [t.id, false]; }); })))
+      .then(function (done) { done.forEach(function (x) { put("todos", { id: x[0], calEvent: x[1] }); }); })
+      .catch(function () {
+        if (!calWarned) { calWarned = true; setSync("Calendar reminders not working yet", true); }
+      })
+      .then(function () { calBusy = false; });
+  }
+
   function trashFile(id) { return api("PATCH", DRIVE + "/" + id, JSON.stringify({ trashed: true }), "application/json"); }
 
   var saving = false, again = false, saveT = null;
@@ -174,6 +215,7 @@
       data = fresh; ops.forEach(function (op) { apply(data, op); });
       persist(); render();
       setSync(ops.length ? "Saving…" : "Synced " + new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }));
+      syncCalendar();
     }).catch(function (e) {
       if (e && e.message === "drive 404") { fileId = null; persist(); }
       if (e && e.message === "auth") needSignIn("Saved here, reconnect to sync");
@@ -391,19 +433,24 @@
     var b = e.target.closest("button[data-tab]"); if (!b) return;
     ui.tab = b.dataset.tab; ui.cat = b.dataset.cat || ""; ls(UI, ui); render();
   });
+  function delItem(list, id) {
+    var t = list === "todos" && data.todos.find(function (x) { return x.id === id; });
+    if (t && t.calEvent && hasToken()) deleteEvent(id).catch(function () {});
+    del(list, id);
+  }
   function toggle(r) {
     var t = data.todos.find(function (x) { return x.id === r.dataset.id; }); if (!t) return;
     put("todos", { id: t.id, done: !t.done, doneAt: !t.done ? new Date().toISOString() : "" });
   }
   $("panel").addEventListener("click", function (e) {
     var r = e.target.closest(".row"); if (!r) return;
-    if (e.target.closest("[data-del]")) { del(r.dataset.list, r.dataset.id); return; }
+    if (e.target.closest("[data-del]")) { delItem(r.dataset.list, r.dataset.id); return; }
     if (r.classList.contains("tick")) toggle(r);
   });
   $("panel").addEventListener("keydown", function (e) {
     var r = e.target.closest(".row.tick"); if (!r || e.target !== r) return;
     if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggle(r); }
-    if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); del("todos", r.dataset.id); }
+    if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); delItem("todos", r.dataset.id); }
   });
   $("panel").addEventListener("submit", function (e) {
     e.preventDefault(); var f = e.target, v = function (n) { return (f.elements[n] && f.elements[n].value || "").trim(); };
