@@ -414,6 +414,18 @@
     }
   });
   $("signin").addEventListener("click", function () { getToken(true).then(sync).catch(function () { setSync("Sign-in cancelled", true); }); });
+  // After the hourly expiry, use the next tap or keypress (a user gesture, so the popup is allowed)
+  // to get a fresh token silently. Tries at most once every 5 minutes so a cancel isn't nagged.
+  var autoTried = 0;
+  function autoReconnect(e) {
+    if (hasToken() || !tokenClient || !ls("lifeos.signedin")) return;
+    if (e.target.closest && e.target.closest("#signin")) return;
+    if (Date.now() - autoTried < 5 * 60 * 1000) return;
+    autoTried = Date.now();
+    getToken(true).then(sync).catch(function () {});
+  }
+  document.addEventListener("click", autoReconnect, true);
+  document.addEventListener("keydown", autoReconnect, true);
   window.addEventListener("focus", function () { if (hasToken()) sync(); });
   window.addEventListener("online", sync);
 
