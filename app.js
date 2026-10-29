@@ -257,20 +257,79 @@
   }
 
   function renderTodo() {
-    var all = data.todos.slice().sort(newestFirst);
-    var cats = Object.keys(data.categories);
-    var chips = '<div class="chips">' + ['<button class="chip" data-cat="" aria-pressed="' + !ui.cat + '">All</button>'].concat(cats.map(function (c) {
-      return '<button class="chip" data-cat="' + esc(c) + '" aria-pressed="' + (ui.cat === c) + '" style="--c:' + esc(catColor(c)) + '">' + esc(c) + "</button>";
-    })).join("") + "</div>";
-    var list = ui.cat ? all.filter(function (t) { return t.category === ui.cat; }) : all;
+    var list = catTodos().sort(newestFirst);
     var t = today();
     var dueNow = list.filter(function (x) { return !x.done && x.due && x.due <= t; });
     var open = list.filter(function (x) { return !x.done && !(x.due && x.due <= t); });
     var done = list.filter(function (x) { return x.done; }).slice(0, 15);
-    return chips +
-      (dueNow.length ? section("Today", dueNow.length, dueNow.map(todoRow).join("")) : "") +
-      section("To-do", open.length, open.map(todoRow).join("")) +
+    return (dueNow.length ? section("Today", dueNow.length, dueNow.map(todoRow).join("")) : "") +
+      section(ui.cat || "All to-dos", open.length, open.map(todoRow).join("")) +
       (done.length ? section("Done", "", done.map(todoRow).join("")) : "");
+  }
+  function catTodos() { return ui.cat ? data.todos.filter(function (t) { return t.category === ui.cat; }) : data.todos.slice(); }
+
+  /* ---------- left pane: sections + categories ---------- */
+  function renderSide() {
+    var open = function (c) { return data.todos.filter(function (t) { return !t.done && (!c || t.category === c); }).length; };
+    var nav = function (tab, icon, label, n) {
+      var on = ui.tab === tab && (tab !== "todo" || !ui.cat);
+      return '<button class="nav" data-tab="' + tab + '" aria-current="' + on + '"><i class="ti ' + icon + '" aria-hidden="true"></i>' + label + '<span class="n">' + (n || "") + "</span></button>";
+    };
+    return nav("todo", "ti-checkbox", "To-do", open()) + nav("notes", "ti-notes", "Notes", data.notes.length) +
+      nav("money", "ti-coin", "Money", "") + nav("log", "ti-heart", "Log", data.log.length) +
+      '<div class="label">Categories</div>' +
+      Object.keys(data.categories).map(function (c) {
+        return '<button class="nav" data-tab="todo" data-cat="' + esc(c) + '" aria-current="' + (ui.tab === "todo" && ui.cat === c) + '" style="--c:' + esc(catColor(c)) + '"><i class="sq"></i>' + esc(c) + '<span class="n">' + (open(c) || "") + "</span></button>";
+      }).join("");
+  }
+
+  /* ---------- right rail: progress, spending, mood ---------- */
+  function ring(pct, color) {
+    var r = 22, len = 2 * Math.PI * r, on = Math.max(0, Math.min(100, pct)) / 100 * len;
+    return '<svg width="56" height="56" viewBox="0 0 56 56" aria-hidden="true"><circle cx="28" cy="28" r="' + r + '" fill="none" stroke="#333" stroke-width="7"/>' +
+      '<circle cx="28" cy="28" r="' + r + '" fill="none" stroke="' + esc(color) + '" stroke-width="7" stroke-linecap="round" stroke-dasharray="' + on.toFixed(1) + " " + len.toFixed(1) + '" transform="rotate(-90 28 28)"/></svg>';
+  }
+  function lastDays(n) { var out = []; for (var i = n - 1; i >= 0; i--) out.push(addDays(-i)); return out; }
+  function renderRail() {
+    var list = catTodos(), done = list.filter(function (t) { return t.done; }).length;
+    var pct = list.length ? Math.round(done / list.length * 100) : 0;
+    var color = ui.cat ? catColor(ui.cat) : "#ffb3c7";
+    var progress = '<div class="stat"><div class="sh"><h2>' + esc(ui.cat || "Progress") + '</h2></div><div class="ringrow">' + ring(pct, color) +
+      '<div><div class="big">' + pct + '%</div><div class="sub">' + done + " of " + list.length + " done</div></div></div></div>";
+
+    // spending: last 7 days, impulse in pink
+    var days = lastDays(7), W = 220, H = 70, bw = W / 7;
+    var byDay = days.map(function (d) {
+      var s = data.spending.filter(function (x) { return x.date === d; });
+      return { d: d, total: s.reduce(function (a, x) { return a + (Number(x.amount) || 0); }, 0),
+        imp: s.filter(function (x) { return x.kind === "impulse"; }).reduce(function (a, x) { return a + (Number(x.amount) || 0); }, 0) };
+    });
+    var max = Math.max.apply(null, byDay.map(function (x) { return x.total; }).concat([1]));
+    var week = byDay.reduce(function (a, x) { return a + x.total; }, 0);
+    var bars = byDay.map(function (x, i) {
+      var h = x.total / max * (H - 14), hi = x.imp / max * (H - 14), xx = i * bw + 4, w = bw - 8;
+      return '<rect x="' + xx + '" y="' + (H - 12 - h) + '" width="' + w + '" height="' + h + '" rx="2" fill="#b8f0d8"><title>' + esc(short(x.d) + " " + money(x.total)) + "</title></rect>" +
+        (hi ? '<rect x="' + xx + '" y="' + (H - 12 - hi) + '" width="' + w + '" height="' + hi + '" rx="2" fill="#ff8fab"/>' : "") +
+        '<text x="' + (xx + w / 2) + '" y="' + (H - 1) + '" font-size="9" fill="#8a8a8a" text-anchor="middle">' + "SMTWTFS".charAt(new Date(x.d + "T00:00:00").getDay()) + "</text>";
+    }).join("");
+    var spend = '<div class="stat"><div class="sh"><h2>Spent</h2><span class="right">' + money(week) + ' this week</span></div>' +
+      '<svg class="chart" viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Spending, last 7 days">' + bars + "</svg>" +
+      '<div class="legend"><span style="--c:#b8f0d8"><i></i>Needed</span><span style="--c:#ff8fab"><i></i>Impulse</span></div></div>';
+
+    // mood + energy: last 7 log entries
+    var logs = data.log.slice().sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).slice(-7);
+    var mood = "";
+    if (logs.length) {
+      var line = function (key, col) {
+        var pts = logs.map(function (l, i) { var v = Number(l[key]) || 0; return [logs.length > 1 ? i / (logs.length - 1) * (W - 10) + 5 : W / 2, 55 - (v - 1) / 4 * 45]; });
+        return '<polyline fill="none" stroke="' + col + '" stroke-width="2.5" stroke-linejoin="round" points="' + pts.map(function (p) { return p.join(","); }).join(" ") + '"/>' +
+          pts.map(function (p) { return '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="3" fill="' + col + '"/>'; }).join("");
+      };
+      mood = '<div class="stat"><div class="sh"><h2>Mood</h2><span class="right">last ' + logs.length + "</span></div>" +
+        '<svg class="chart" viewBox="0 0 ' + W + ' 60" role="img" aria-label="Mood and energy">' + line("energy", "#c9b8ff") + line("mood", "#ffb3c7") + "</svg>" +
+        '<div class="legend"><span style="--c:#ffb3c7"><i></i>Mood</span><span style="--c:#c9b8ff"><i></i>Energy</span></div></div>';
+    }
+    return progress + spend + mood;
   }
 
   function noteRow(n) {
@@ -322,22 +381,21 @@
 
   function render() {
     var t = ui.tab;
-    [].forEach.call($("tabs").children, function (b) { b.setAttribute("aria-selected", b.dataset.tab === t ? "true" : "false"); });
-    $("n-todo").textContent = data.todos.filter(function (x) { return !x.done; }).length || "";
-    $("n-notes").textContent = data.notes.length || "";
-    $("n-money").textContent = "";
-    $("n-log").textContent = "";
+    $("side").innerHTML = renderSide();
     $("panel").innerHTML = t === "notes" ? renderNotes() : t === "money" ? renderMoney() : t === "log" ? renderLog() : renderTodo();
+    $("rail").innerHTML = renderRail();
   }
 
   /* ---------- events ---------- */
-  $("tabs").addEventListener("click", function (e) { var b = e.target.closest("button[data-tab]"); if (!b) return; ui.tab = b.dataset.tab; ls(UI, ui); render(); });
+  $("side").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-tab]"); if (!b) return;
+    ui.tab = b.dataset.tab; ui.cat = b.dataset.cat || ""; ls(UI, ui); render();
+  });
   function toggle(r) {
     var t = data.todos.find(function (x) { return x.id === r.dataset.id; }); if (!t) return;
     put("todos", { id: t.id, done: !t.done, doneAt: !t.done ? new Date().toISOString() : "" });
   }
   $("panel").addEventListener("click", function (e) {
-    var chip = e.target.closest(".chip"); if (chip) { ui.cat = chip.dataset.cat; ls(UI, ui); render(); return; }
     var r = e.target.closest(".row"); if (!r) return;
     if (e.target.closest("[data-del]")) { del(r.dataset.list, r.dataset.id); return; }
     if (r.classList.contains("tick")) toggle(r);

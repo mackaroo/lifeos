@@ -31,14 +31,11 @@
     <button class="btn" id="signin" type="button" hidden><i class="ti ti-brand-google-drive" aria-hidden="true"></i> Connect Drive</button>
   </header>
 
-  <nav class="tabs" id="tabs" role="tablist">
-    <button role="tab" data-tab="todo"><i class="ti ti-checkbox" aria-hidden="true"></i> To-do <span class="n" id="n-todo"></span></button>
-    <button role="tab" data-tab="notes"><i class="ti ti-notes" aria-hidden="true"></i> Notes <span class="n" id="n-notes"></span></button>
-    <button role="tab" data-tab="money"><i class="ti ti-coin" aria-hidden="true"></i> Money <span class="n" id="n-money"></span></button>
-    <button role="tab" data-tab="log"><i class="ti ti-heart" aria-hidden="true"></i> Log <span class="n" id="n-log"></span></button>
-  </nav>
-
-  <main class="panel" id="panel"></main>
+  <div class="panes">
+    <aside class="side" id="side" aria-label="Sections and categories"></aside>
+    <main class="panel" id="panel"></main>
+    <aside class="rail" id="rail" aria-label="Stats"></aside>
+  </div>
   <p class="msg" id="msg" hidden></p>
 </div>
 <script src="config.js"></script>
