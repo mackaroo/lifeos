@@ -6,7 +6,10 @@
   var CFG = window.LIFEOS_CONFIG;
   var $ = function (id) { return document.getElementById(id); };
   var CACHE = "lifeos.cache.v1", UI = "lifeos.ui.v1";
-  var SCOPE = "https://www.googleapis.com/auth/drive.file";
+  // Full Drive scope so the app can read inbox files that Claude creates through the Drive
+  // connector (the connector can create files but cannot rewrite one).
+  var SCOPE = "https://www.googleapis.com/auth/drive";
+  var INBOX = "lifeos-inbox";
 
   /* ---------- small helpers ---------- */
   function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
@@ -51,6 +54,7 @@
   // Google access tokens last an hour. Browsers only allow the sign-in popup after a click,
   // so the token is kept across reloads and, once expired, the Connect button reappears.
   var saved = ls("lifeos.token") || {};
+  if (saved.s !== SCOPE) saved = {};
   var token = saved.t || null, tokenExp = saved.exp || 0, tokenClient = null, pendingToken = [];
   function hasToken() { return token && Date.now() < tokenExp; }
   function setSync(text, err) { var s = $("sync"); s.textContent = text; s.classList.toggle("err", !!err); }
@@ -63,7 +67,7 @@
       callback: function (r) {
         if (r.error) { needSignIn(); flushToken(null); return; }
         token = r.access_token; tokenExp = Date.now() + (r.expires_in - 60) * 1000;
-        ls("lifeos.token", { t: token, exp: tokenExp }); ls("lifeos.signedin", true);
+        ls("lifeos.token", { t: token, exp: tokenExp, s: SCOPE }); ls("lifeos.signedin", true);
         $("signin").hidden = true; flushToken(token);
       },
       error_callback: function () { needSignIn(); flushToken(null); }
@@ -110,6 +114,39 @@
   }
   function writeFile(id, d) { return api("PATCH", UPLOAD + "/" + id + "?uploadType=media", JSON.stringify(d, null, 2), "application/json"); }
 
+  /* Inbox: Claude adds or changes items by creating "lifeos-inbox-….json" files shaped like
+     { "merge": { "todos": [items] }, "delete": { "todos": ["id"] } }. Items are matched by id
+     (log entries by date). The app folds them into lifeos.json, then moves the inbox file to trash. */
+  function readInbox() {
+    var q = encodeURIComponent("name contains '" + INBOX + "' and trashed=false");
+    return api("GET", DRIVE + "?q=" + q + "&spaces=drive&orderBy=createdTime&fields=files(id,name)").then(function (r) { return r.json(); })
+      .then(function (j) {
+        var files = (j.files || []).filter(function (f) { return f.name.indexOf(INBOX) === 0; });
+        return Promise.all(files.map(function (f) {
+          return api("GET", DRIVE + "/" + f.id + "?alt=media").then(function (r) { return r.json(); })
+            .then(function (body) { return { id: f.id, body: body }; }, function () { return { id: f.id, body: null }; });
+        }));
+      });
+  }
+  function applyInbox(d, items) {
+    items.forEach(function (it) {
+      var b = it.body || {};
+      Object.keys(b.merge || {}).forEach(function (list) {
+        if (list === "categories") { apply(d, { t: "cats", cats: b.merge.categories }); return; }
+        (b.merge[list] || []).forEach(function (item) {
+          if (list === "log" && !item.id) item.id = item.date;
+          if (!item.id) item.id = uid();
+          apply(d, { t: "put", list: list, id: item.id, item: item });
+        });
+      });
+      Object.keys(b.delete || {}).forEach(function (list) {
+        (b.delete[list] || []).forEach(function (id) { apply(d, { t: "del", list: list, id: id }); });
+      });
+    });
+    return d;
+  }
+  function trashFile(id) { return api("PATCH", DRIVE + "/" + id, JSON.stringify({ trashed: true }), "application/json"); }
+
   var saving = false, again = false, saveT = null;
   function scheduleSave() { clearTimeout(saveT); saveT = setTimeout(sync, 700); }
   function sync() {
@@ -122,11 +159,15 @@
     p.then(function (id) {
       if (!id) return createFile(Object.assign(data, { updated: new Date().toISOString() })).then(function (nid) { fileId = nid; return data; });
       fileId = id;
-      return readFile(id).then(function (remote) {
-        if (!sent) return remote;
+      return Promise.all([readFile(id), readInbox()]).then(function (got) {
+        var remote = got[0], inbox = got[1].filter(function (x) { return x.body; });
+        if (!sent && !inbox.length) return remote;
+        applyInbox(remote, inbox);
         ops.slice(0, sent).forEach(function (op) { apply(remote, op); });
         remote.updated = new Date().toISOString();
-        return writeFile(id, remote).then(function () { return remote; });
+        return writeFile(id, remote)
+          .then(function () { return Promise.all(inbox.map(function (x) { return trashFile(x.id); })); })
+          .then(function () { return remote; });
       });
     }).then(function (fresh) {
       ops = ops.slice(sent);
